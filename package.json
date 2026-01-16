@@ -1,0 +1,11 @@
+{
+  "name": "kc-spa-demo",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev:web": "pnpm -C apps/web dev --port 5173",
+    "dev:api": "pnpm -C apps/api start:dev",
+    "kc:up": "docker compose -f infra/keycloak/docker-compose.yml up -d",
+    "kc:down": "docker compose -f infra/keycloak/docker-compose.yml down"
+  }
+}
