@@ -11,7 +11,9 @@
 3. [인증 플로우 전체 흐름](#인증-플로우-전체-흐름)
 4. [Frontend (React) 구현](#frontend-react-구현)
 5. [Backend (NestJS) 구현](#backend-nestjs-구현)
-6. [Keycloak 역할](#keycloak-역할)
+6. [Backend (FastAPI) 구현](#backend-fastapi-구현)
+7. [NestJS vs FastAPI 비교](#nestjs-vs-fastapi-비교)
+8. [Keycloak 역할](#keycloak-역할)
 
 ---
 
@@ -599,6 +601,319 @@ export class AuthModule {}
 - Passport 모듈 임포트
 - JwtStrategy와 JwtAuthGuard 등록
 - JwtAuthGuard를 다른 모듈에서 사용 가능하게 export
+
+---
+
+## Backend (FastAPI) 구현
+
+### FastAPI란?
+
+FastAPI는 Python으로 API를 만드는 **현대적이고 빠른 웹 프레임워크**입니다. 타입 힌트 기반으로 자동 문서화와 데이터 검증을 제공합니다.
+
+### NestJS와의 차이
+
+| NestJS | FastAPI |
+|--------|---------|
+| 데코레이터, 모듈, DI 등 복잡한 구조 | 함수 기반의 단순한 구조 |
+| 여러 파일로 분리 필수 | 하나의 파일로도 가능 |
+| TypeScript | Python |
+| Passport.js로 인증 | 직접 또는 간단한 라이브러리 |
+
+### 파일 구조
+
+```
+apps/api-python/
+├── main.py           # 전체 애플리케이션 (단일 파일!)
+├── requirements.txt  # Python 의존성
+└── .gitignore
+```
+
+NestJS는 6개 이상의 파일이 필요했지만, FastAPI는 **단일 파일**로 동일한 기능을 구현합니다.
+
+### 전체 코드 (main.py)
+
+```python
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import httpx
+from jose import jwt, JWTError
+import os
+
+# ============================================
+# 설정
+# ============================================
+
+KC_BASE = os.getenv("KC_BASE", "http://localhost:8080")
+KC_REALM = os.getenv("KC_REALM", "demo")
+ISSUER = f"{KC_BASE}/realms/{KC_REALM}"
+JWKS_URL = f"{ISSUER}/protocol/openid-connect/certs"
+
+# ============================================
+# FastAPI 앱 생성
+# ============================================
+
+app = FastAPI(title="Keycloak SPA Demo API (Python)")
+
+# CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================
+# JWT 인증
+# ============================================
+
+security = HTTPBearer()
+jwks_cache = None  # 공개키 캐시
+
+
+async def get_jwks():
+    """Keycloak에서 공개키(JWKS) 가져오기"""
+    global jwks_cache
+    if jwks_cache is None:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(JWKS_URL)
+            jwks_cache = response.json()
+    return jwks_cache
+
+
+async def verify_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    """JWT 토큰 검증"""
+    token = credentials.credentials
+
+    try:
+        jwks = await get_jwks()
+
+        # JWT 헤더에서 kid 추출
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+
+        # JWKS에서 해당 키 찾기
+        key = next((k for k in jwks["keys"] if k["kid"] == kid), None)
+        if not key:
+            raise HTTPException(401, "Public key not found")
+
+        # 토큰 검증
+        payload = jwt.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            issuer=ISSUER,
+            options={"verify_aud": False},
+        )
+        return payload
+
+    except JWTError as e:
+        raise HTTPException(401, f"Token validation failed: {e}")
+
+
+# ============================================
+# 라우트
+# ============================================
+
+@app.get("/")
+def root():
+    """공개 엔드포인트"""
+    return {"message": "Hello from FastAPI!"}
+
+
+@app.get("/me")
+async def me(user: dict = Depends(verify_token)):
+    """보호된 엔드포인트 - JWT 필요"""
+    return {
+        "sub": user.get("sub"),
+        "preferred_username": user.get("preferred_username"),
+        "email": user.get("email"),
+        "roles": user.get("realm_access", {}).get("roles", []),
+        "raw": user,
+    }
+```
+
+### 코드 설명
+
+#### 1. CORS 설정
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # React 앱 허용
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+NestJS의 `app.enableCors()`와 동일한 역할입니다.
+
+#### 2. Bearer 토큰 추출
+
+```python
+security = HTTPBearer()
+
+async def verify_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    token = credentials.credentials  # Bearer 토큰
+```
+
+- `HTTPBearer()`: Authorization 헤더에서 Bearer 토큰을 자동 추출
+- `Depends(security)`: 의존성 주입 (NestJS의 Guard와 비슷)
+
+#### 3. JWKS 조회 및 캐싱
+
+```python
+jwks_cache = None
+
+async def get_jwks():
+    global jwks_cache
+    if jwks_cache is None:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(JWKS_URL)
+            jwks_cache = response.json()
+    return jwks_cache
+```
+
+- `httpx`: Python의 async HTTP 클라이언트
+- 한 번 가져온 공개키는 캐싱하여 재사용
+
+#### 4. JWT 검증
+
+```python
+from jose import jwt
+
+# 헤더에서 kid 추출 (검증 없이)
+header = jwt.get_unverified_header(token)
+kid = header.get("kid")
+
+# JWKS에서 해당 키 찾기
+key = next((k for k in jwks["keys"] if k["kid"] == kid), None)
+
+# 토큰 검증 (서명 + issuer + 만료시간)
+payload = jwt.decode(
+    token,
+    key,
+    algorithms=["RS256"],
+    issuer=ISSUER,
+    options={"verify_aud": False},
+)
+```
+
+**검증 과정:**
+1. JWT 헤더에서 `kid` (Key ID) 추출
+2. JWKS에서 해당 `kid`의 공개키 찾기
+3. 공개키로 서명 검증
+4. `issuer` claim 검증
+5. `exp` (만료시간) 자동 검증
+
+#### 5. 보호된 엔드포인트
+
+```python
+@app.get("/me")
+async def me(user: dict = Depends(verify_token)):
+    return {
+        "sub": user.get("sub"),
+        "preferred_username": user.get("preferred_username"),
+        ...
+    }
+```
+
+- `Depends(verify_token)`: 이 함수가 먼저 실행되어 토큰 검증
+- 검증 성공 시 `user`에 JWT payload가 들어옴
+- 검증 실패 시 401 에러 자동 반환
+
+### 실행 방법
+
+```bash
+# 1. 가상환경 생성 (권장)
+cd apps/api-python
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 2. 의존성 설치
+pip install -r requirements.txt
+
+# 3. 서버 실행
+uvicorn main:app --reload --port 3002
+
+# 또는 루트에서
+pnpm run dev:api-python
+```
+
+### API 문서 자동 생성
+
+FastAPI는 **자동으로 API 문서를 생성**합니다:
+
+- Swagger UI: `http://localhost:3002/docs`
+- ReDoc: `http://localhost:3002/redoc`
+
+NestJS에서는 별도로 `@nestjs/swagger`를 설치하고 설정해야 하지만, FastAPI는 기본 제공합니다.
+
+---
+
+## NestJS vs FastAPI 비교
+
+### 코드량 비교
+
+| 항목 | NestJS | FastAPI |
+|------|--------|---------|
+| 파일 수 | 6개 | 1개 |
+| 총 코드 라인 | ~150줄 | ~80줄 |
+| 설정 파일 | package.json, tsconfig 등 | requirements.txt |
+
+### 구조 비교
+
+**NestJS (6개 파일)**
+```
+src/
+├── main.ts           # 진입점
+├── app.module.ts     # 모듈 정의
+├── app.controller.ts # 컨트롤러
+├── app.service.ts    # 서비스
+└── auth/
+    ├── auth.module.ts
+    ├── jwt.strategy.ts
+    └── jwt.guard.ts
+```
+
+**FastAPI (1개 파일)**
+```
+main.py  # 모든 것이 여기에!
+```
+
+### 장단점
+
+| | NestJS | FastAPI |
+|---|--------|---------|
+| **장점** | 대규모 프로젝트에 적합, 구조화됨, TypeScript | 빠른 개발, 간단함, 자동 문서화 |
+| **단점** | 학습 곡선 높음, 보일러플레이트 많음 | 대규모 프로젝트 구조화 필요 |
+| **적합한 경우** | 엔터프라이즈, 팀 프로젝트 | 빠른 프로토타이핑, 소규모 API |
+
+### 같은 기능, 다른 표현
+
+**인증 Guard**
+
+NestJS:
+```typescript
+@UseGuards(JwtAuthGuard)
+@Get('me')
+me(@Req() req: any) {
+  return req.user;
+}
+```
+
+FastAPI:
+```python
+@app.get("/me")
+async def me(user: dict = Depends(verify_token)):
+    return user
+```
+
+둘 다 "이 엔드포인트는 토큰 검증이 필요하다"는 같은 의미입니다.
 
 ---
 

@@ -5,6 +5,7 @@
   "scripts": {
     "dev:web": "pnpm -C apps/web dev --port 5173",
     "dev:api": "pnpm -C apps/api start:dev",
+    "dev:api-python": "cd apps/api-python && uvicorn main:app --reload --port 3002",
     "kc:up": "docker compose -f infra/keycloak/docker-compose.yml up -d",
     "kc:down": "docker compose -f infra/keycloak/docker-compose.yml down"
   }
